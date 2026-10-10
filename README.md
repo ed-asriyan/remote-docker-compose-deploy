@@ -118,7 +118,6 @@ Run `build.yml` and `deploy.yml` once per file. The images artifact is named aft
 | `compose-file` | yes | | the same path that was passed to `build.yml` |
 | `host` | no | `SSH_HOST` secret | host to deploy to |
 | `port` | no | `22` | SSH port |
-| `environment` | no | `production` | GitHub environment the job runs in |
 
 | Secret | Required | Description |
 |--------|----------|-------------|
@@ -130,7 +129,7 @@ Run `build.yml` and `deploy.yml` once per file. The images artifact is named aft
 ## Secrets and security
 
 - A called workflow runs with the permissions of your repository. It receives only the secrets you list under `secrets:`; pass them explicitly and do not use `secrets: inherit`. Pin the workflow to a release tag (`@v1`) or, for the strictest setting, to a commit sha, never to a branch.
-- The secrets must be stored at the repository or organization level. A caller job that uses a reusable workflow cannot select a GitHub environment, so secrets stored only in an environment cannot be passed.
+- The secrets must be stored at the repository or organization level: the workflow runs in no GitHub environment, so environment secrets are not visible to it.
 - `.env` is written with mode `600` on the runner; it is uploaded over SSH and is not printed to the log.
 
 ## Releases

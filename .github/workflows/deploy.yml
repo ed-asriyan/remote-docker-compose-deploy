@@ -25,11 +25,6 @@ on:
         required: false
         type: number
         default: 22
-      environment:
-        description: 'GitHub environment to deploy in'
-        required: false
-        type: string
-        default: production
     secrets:
       SSH_PRIVATE_KEY:
         description: 'Private key to log in with'
@@ -47,7 +42,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
     env:
       COMPOSE_FILE: ${{ inputs.compose-file }}
       TAG: ${{ github.sha }}
