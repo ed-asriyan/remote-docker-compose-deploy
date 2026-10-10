@@ -1,0 +1,161 @@
+name: Deploy
+
+# Deploys a compose file to a host over SSH using the images built by build.yml
+# in the same workflow run.
+#
+# The host comes from the `host` input or, when that is empty, from the
+# SSH_HOST secret. The SSH_USERNAME and SSH_PRIVATE_KEY secrets are required.
+# Call it with `secrets: inherit` (so secrets stored in the GitHub environment
+# are visible too) or pass the secrets one by one.
+#
+# `env-file` is a template for the .env file written next to the compose file
+# on the host; ${NAME} placeholders are filled from the secrets and variables
+# available to the job (environment ones included, with `secrets: inherit`).
+# The ENV_FILE secret, if set, is appended to it verbatim.
+
+on:
+  workflow_call:
+    inputs:
+      compose-file:
+        description: 'Path to the compose file (the same as passed to build.yml)'
+        required: true
+        type: string
+      host:
+        description: 'Host to deploy to; falls back to the SSH_HOST secret'
+        required: false
+        type: string
+        default: ''
+      port:
+        description: 'SSH port'
+        required: false
+        type: number
+        default: 22
+      environment:
+        description: 'GitHub environment to deploy in'
+        required: false
+        type: string
+        default: production
+      env-file:
+        description: 'Env file template, ${NAME} is replaced with the secret or variable NAME'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      SSH_PRIVATE_KEY:
+        description: 'Private key to log in with'
+        required: false
+      SSH_USERNAME:
+        description: 'User to log in as'
+        required: false
+      SSH_HOST:
+        description: 'Host to deploy to when the `host` input is empty'
+        required: false
+      ENV_FILE:
+        description: 'Content appended verbatim to the .env file on the host'
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      COMPOSE_FILE: ${{ inputs.compose-file }}
+      TAG: ${{ github.sha }}
+      SSH_HOST: ${{ inputs.host || secrets.SSH_HOST }}
+      SSH_PORT: ${{ inputs.port }}
+      SSH_USER: ${{ secrets.SSH_USERNAME }}
+    steps:
+      - name: Check required settings
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in SSH_HOST SSH_USER SSH_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is empty: pass the 'host' input or SSH_HOST, SSH_USERNAME and SSH_PRIVATE_KEY secrets (use 'secrets: inherit' for ones stored in the environment)"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve names
+        id: meta
+        run: |
+          set -euo pipefail
+          echo "artifact=images-$(echo "$COMPOSE_FILE" | sed 's#[^A-Za-z0-9._-]#-#g')" >> "$GITHUB_OUTPUT"
+          echo "REMOTE_DIR=apps/$(yq -e '.name' "$COMPOSE_FILE")" >> "$GITHUB_ENV"
+
+      - name: Download images
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ steps.meta.outputs.artifact }}
+          path: deploy
+
+      - name: Prepare compose and env files
+        env:
+          ENV_TEMPLATE: ${{ inputs.env-file }}
+          ENV_APPENDIX: ${{ secrets.ENV_FILE }}
+          SECRETS_JSON: ${{ toJSON(secrets) }}
+          VARS_JSON: ${{ toJSON(vars) }}
+        run: |
+          set -euo pipefail
+          umask 077
+          cp "$COMPOSE_FILE" deploy/
+          values=$(jq -s 'add' <(echo "$VARS_JSON") <(echo "$SECRETS_JSON"))
+          while IFS= read -r -d '' kv; do
+            export "$kv"
+          done < <(jq -j 'to_entries[] | "\(.key)=\(.value)\u0000"' <<< "$values")
+          printf '%s\n' "$ENV_TEMPLATE" \
+            | envsubst "$(jq -r 'keys[] | "${\(.)}"' <<< "$values")" \
+            > "deploy/.env"
+          if [ -n "$ENV_APPENDIX" ]; then
+            printf '%s\n' "$ENV_APPENDIX" >> deploy/.env
+          fi
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add remote host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload files to remote
+        run: |
+          set -euo pipefail
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "rm -rf \"\$HOME/$REMOTE_DIR\" && mkdir -p \"\$HOME/$REMOTE_DIR\""
+          scp -P "$SSH_PORT" deploy/* deploy/.env "$SSH_USER@$SSH_HOST:$REMOTE_DIR/"
+
+      - name: Load images and deploy on remote
+        run: |
+          set -euo pipefail
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            COMPOSE_FILE="$(basename "$COMPOSE_FILE")" TAG="$TAG" REMOTE_DIR="$REMOTE_DIR" bash -s <<'EOS'
+          set -euo pipefail
+          if ! command -v docker >/dev/null 2>&1; then
+            apt update && apt install -y curl
+            curl https://get.docker.com | sh
+            systemctl enable docker
+            systemctl start docker
+          fi
+          if docker compose version >/dev/null 2>&1; then
+            COMPOSE="docker compose"
+          else
+            COMPOSE="docker-compose"
+          fi
+          cd "$HOME/$REMOTE_DIR"
+          docker load -i images.tar
+          export TAG
+          $COMPOSE -f "$COMPOSE_FILE" up -d --no-build --remove-orphans
+          rm -f images.tar
+          docker container prune -f || true
+          for image in $($COMPOSE -f "$COMPOSE_FILE" config --images); do
+            docker image ls --format '{{.Repository}}:{{.Tag}}' "${image%:*}" | grep -vxF "$image" | xargs -r docker rmi || true
+          done
+          EOS
