@@ -1,0 +1,70 @@
+name: Build
+
+# Builds every service with a `build` section in a compose file and uploads
+# the images as an artifact for deploy.yml. Each such service must set
+# `image:` with a ${TAG} placeholder, e.g. `image: myapp/web:${TAG:-latest}`;
+# TAG is the commit sha.
+
+on:
+  workflow_call:
+    inputs:
+      compose-file:
+        description: 'Path to the compose file'
+        required: true
+        type: string
+    outputs:
+      artifact:
+        description: 'Name of the uploaded images artifact'
+        value: ${{ jobs.build.outputs.artifact }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE_FILE: ${{ inputs.compose-file }}
+      TAG: ${{ github.sha }}
+    outputs:
+      artifact: ${{ steps.meta.outputs.artifact }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Resolve artifact name
+        id: meta
+        run: echo "artifact=images-$(echo "$COMPOSE_FILE" | sed 's#[^A-Za-z0-9._-]#-#g')" >> "$GITHUB_OUTPUT"
+
+      # env files are only read at runtime, but bake fails if they are missing
+      - name: Create placeholder env files
+        run: |
+          set -euo pipefail
+          cd "$(dirname "$COMPOSE_FILE")"
+          yq -o=json '.' "$(basename "$COMPOSE_FILE")" \
+            | jq -r '.services[].env_file // empty | if type == "array" then .[] else . end | if type == "object" then .path else . end' \
+            | while IFS= read -r f; do [ -e "$f" ] || touch "$f"; done
+
+      - name: Build images
+        uses: docker/bake-action@v7
+        with:
+          source: .
+          files: ${{ inputs.compose-file }}
+          load: true
+          set: |
+            *.cache-from=type=gha,scope=${{ steps.meta.outputs.artifact }}
+            *.cache-to=type=gha,mode=max,scope=${{ steps.meta.outputs.artifact }}
+
+      - name: Save images
+        run: |
+          set -euo pipefail
+          images=$(docker compose -f "$COMPOSE_FILE" config --no-env-resolution --format json \
+            | jq -r '.services[] | select(.build) | .image // error("service with build has no image")')
+          docker save -o images.tar $images
+
+      - name: Upload images
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact }}
+          path: images.tar
+          retention-days: 1
