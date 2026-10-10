@@ -34,8 +34,6 @@ Named volumes and bind mounts outside `~/apps/<project>` survive a deploy; the d
 | `SSH_USERNAME` | secret | user to log in as |
 | `SSH_HOST` | secret | host to deploy to, unless you pass the `host` input |
 
-A GitHub environment (`production` by default) may hold them instead of the repository.
-
 ## Usage
 
 ```yaml
@@ -62,23 +60,23 @@ jobs:
     with:
       compose-file: docker-compose.yml
       host: deploy.example.com
-    secrets: inherit
+    secrets:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
 ```
 
 ### Environment file
 
-`env-file` is a template for the `.env` written next to the compose file. `${NAME}` is replaced with the secret or variable `NAME`; a placeholder that matches nothing is left as written.
+The `ENV_FILE` secret is written as `.env` next to the compose file. Build it from your own secrets in the caller:
 
 ```yaml
-    with:
-      compose-file: docker-compose.yml
-      env-file: |
-        BOT_TOKEN=${BOT_TOKEN}
+    secrets:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+      ENV_FILE: |
+        BOT_TOKEN=${{ secrets.BOT_TOKEN }}
         LOG_LEVEL=info
-    secrets: inherit
 ```
-
-The `ENV_FILE` secret, if set, is appended to the file verbatim.
 
 ### Several hosts
 
@@ -92,7 +90,9 @@ The `ENV_FILE` secret, if set, is appended to the file verbatim.
     with:
       compose-file: docker-compose.yml
       host: ${{ matrix.host }}
-    secrets: inherit
+    secrets:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
 ```
 
 ### Several compose files
@@ -119,23 +119,19 @@ Run `build.yml` and `deploy.yml` once per file. The images artifact is named aft
 | `host` | no | `SSH_HOST` secret | host to deploy to |
 | `port` | no | `22` | SSH port |
 | `environment` | no | `production` | GitHub environment the job runs in |
-| `env-file` | no | empty | `.env` template, see above |
 
-| Secret | Description |
-|--------|-------------|
-| `SSH_PRIVATE_KEY` | required in practice, see the next section |
-| `SSH_USERNAME` | required in practice |
-| `SSH_HOST` | used when the `host` input is empty |
-| `ENV_FILE` | appended to the `.env` |
-
-The secrets are declared optional only so that `secrets: inherit` is accepted when they live in the GitHub environment; the first step of the job fails with a clear message if any of the three is missing.
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `SSH_PRIVATE_KEY` | yes | private key to log in with |
+| `SSH_USERNAME` | yes | user to log in as |
+| `SSH_HOST` | no | used when the `host` input is empty |
+| `ENV_FILE` | no | content of the `.env` |
 
 ## Secrets and security
 
-- A called workflow runs with the permissions of your repository and sees the secrets you give it. With `secrets: inherit` that is **all** of them, because `env-file` placeholders can name any secret. Pin the workflow to a release tag (`@v1`) or, for the strictest setting, to a commit sha, never to a branch.
-- Secrets stored in a GitHub **environment** reach `deploy.yml` only through `secrets: inherit`: a caller job that uses a reusable workflow cannot select an environment itself, so it cannot read the environment's secrets to pass them explicitly. Repository and organization secrets can be passed one by one under `secrets:`.
+- A called workflow runs with the permissions of your repository. It receives only the secrets you list under `secrets:`; pass them explicitly and do not use `secrets: inherit`. Pin the workflow to a release tag (`@v1`) or, for the strictest setting, to a commit sha, never to a branch.
+- The secrets must be stored at the repository or organization level. A caller job that uses a reusable workflow cannot select a GitHub environment, so secrets stored only in an environment cannot be passed.
 - `.env` is written with mode `600` on the runner; it is uploaded over SSH and is not printed to the log.
-- `inherit` is documented for workflows in the same organization or enterprise; if your account setup does not allow it, pass `SSH_PRIVATE_KEY`, `SSH_USERNAME` and (for the host) the `host` input explicitly, and put the `.env` content in the `ENV_FILE` secret.
 
 ## Releases
 

@@ -5,13 +5,8 @@ name: Deploy
 #
 # The host comes from the `host` input or, when that is empty, from the
 # SSH_HOST secret. The SSH_USERNAME and SSH_PRIVATE_KEY secrets are required.
-# Call it with `secrets: inherit` (so secrets stored in the GitHub environment
-# are visible too) or pass the secrets one by one.
-#
-# `env-file` is a template for the .env file written next to the compose file
-# on the host; ${NAME} placeholders are filled from the secrets and variables
-# available to the job (environment ones included, with `secrets: inherit`).
-# The ENV_FILE secret, if set, is appended to it verbatim.
+# The ENV_FILE secret, if set, is written to the .env file next to the compose
+# file on the host.
 
 on:
   workflow_call:
@@ -35,23 +30,18 @@ on:
         required: false
         type: string
         default: production
-      env-file:
-        description: 'Env file template, ${NAME} is replaced with the secret or variable NAME'
-        required: false
-        type: string
-        default: ''
     secrets:
       SSH_PRIVATE_KEY:
         description: 'Private key to log in with'
-        required: false
+        required: true
       SSH_USERNAME:
         description: 'User to log in as'
-        required: false
+        required: true
       SSH_HOST:
         description: 'Host to deploy to when the `host` input is empty'
         required: false
       ENV_FILE:
-        description: 'Content appended verbatim to the .env file on the host'
+        description: 'Content of the .env file written next to the compose file on the host'
         required: false
 
 jobs:
@@ -73,7 +63,7 @@ jobs:
           missing=0
           for name in SSH_HOST SSH_USER SSH_PRIVATE_KEY; do
             if [ -z "${!name}" ]; then
-              echo "::error::$name is empty: pass the 'host' input or SSH_HOST, SSH_USERNAME and SSH_PRIVATE_KEY secrets (use 'secrets: inherit' for ones stored in the environment)"
+              echo "::error::$name is empty: pass the 'host' input or SSH_HOST, SSH_USERNAME and SSH_PRIVATE_KEY secrets"
               missing=1
             fi
           done
@@ -97,24 +87,12 @@ jobs:
 
       - name: Prepare compose and env files
         env:
-          ENV_TEMPLATE: ${{ inputs.env-file }}
-          ENV_APPENDIX: ${{ secrets.ENV_FILE }}
-          SECRETS_JSON: ${{ toJSON(secrets) }}
-          VARS_JSON: ${{ toJSON(vars) }}
+          ENV_CONTENT: ${{ secrets.ENV_FILE }}
         run: |
           set -euo pipefail
           umask 077
           cp "$COMPOSE_FILE" deploy/
-          values=$(jq -s 'add' <(echo "$VARS_JSON") <(echo "$SECRETS_JSON"))
-          while IFS= read -r -d '' kv; do
-            export "$kv"
-          done < <(jq -j 'to_entries[] | "\(.key)=\(.value)\u0000"' <<< "$values")
-          printf '%s\n' "$ENV_TEMPLATE" \
-            | envsubst "$(jq -r 'keys[] | "${\(.)}"' <<< "$values")" \
-            > "deploy/.env"
-          if [ -n "$ENV_APPENDIX" ]; then
-            printf '%s\n' "$ENV_APPENDIX" >> deploy/.env
-          fi
+          printf '%s\n' "$ENV_CONTENT" > deploy/.env
 
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.10.0
